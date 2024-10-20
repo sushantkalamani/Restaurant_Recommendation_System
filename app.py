@@ -48,51 +48,81 @@ def filter_by_location(user_lat, user_lon, restaurants, radius=7):
         if haversine_distance(user_lat, user_lon, float(row['latitude']), float(row['longitude'])) <= radius
     ])
 
-# Hybrid recommendation function
-def recommend_restaurants(user_lat, user_lon, cuisine, price_for_two, planning_for, liked_restaurant, radius=7, top_n=5):
-    location_filtered_data = filter_by_location(user_lat, user_lon, data, radius)
+# Age-based filtering function
+def filter_by_age(data, age):
+    if age <= 25:
+        return data[data['more_info'].str.contains('birthday|casual|fast food|trendy', case=False, na=False)]
+    elif 26 <= age <= 50:
+        return data[data['more_info'].str.contains('family|formal|business', case=False, na=False)]
+    else:
+        return data[data['more_info'].str.contains('quiet|traditional', case=False, na=False)]
 
-    # Filter by content-based criteria
-    content_filtered_data = location_filtered_data[
-        (location_filtered_data['cuisine'].str.contains(cuisine, case=False, na=False)) &
-        (location_filtered_data['price_for_two'] <= price_for_two) &
-        (location_filtered_data['more_info'].str.contains(planning_for, case=False, na=False))
+# Hybrid recommendation function
+def recommend_restaurants(user_lat, user_lon, cuisine, price_for_two, planning_for, liked_restaurant, age, radius=7, top_n=5):
+    try:
+        location_filtered_data = filter_by_location(user_lat, user_lon, data, radius)
+        
+        # Apply age-based filtering
+        age_filtered_data = filter_by_age(location_filtered_data, age)
+
+        # Filter by content-based criteria
+        content_filtered_data = age_filtered_data[
+            (age_filtered_data['cuisine'].str.contains(cuisine, case=False, na=False)) &
+            (age_filtered_data['price_for_two'] <= price_for_two) &
+            (age_filtered_data['more_info'].str.contains(planning_for, case=False, na=False))
+        ]
+
+        if len(content_filtered_data) < top_n:
+            related_cuisines = age_filtered_data[
+                age_filtered_data['cuisine'].str.contains(cuisine, case=False, na=False)
+            ]
+            content_filtered_data = pd.concat([content_filtered_data, related_cuisines]).drop_duplicates()
+
+        if len(content_filtered_data) < top_n:
+            return content_filtered_data.sort_values(by='rating', ascending=False).head(top_n)
+
+        if liked_restaurant:
+            match = process.extractOne(liked_restaurant, data['name'])
+            if match and match[1] >= 80:
+                liked_index = data[data['name'] == match[0]].index[0]
+                similarity_scores = cosine_similarity(
+                    tfidf_matrix[liked_index], tfidf_matrix[content_filtered_data.index]
+                ).flatten()
+                content_filtered_data['similarity_score'] = similarity_scores
+            else:
+                content_filtered_data['similarity_score'] = 1  # Default similarity score for unmatched
+
+        else:
+            content_filtered_data['similarity_score'] = 1
+
+        content_filtered_data['weighted_score'] = (
+            0.5 * content_filtered_data['similarity_score'] +
+            0.5 * (content_filtered_data['rating'] / data['rating'].max())
+        )
+
+        return content_filtered_data.sort_values(by='weighted_score', ascending=False).head(top_n)
+    
+    except Exception as e:
+        print("No matching restaurant found for this criteria.")
+
+
+def recommend_restaurants_city(liked_restaurant, cuisine, budget, occasion, top_n=5):
+    matches = data[
+        (data['cuisine'].str.contains(cuisine, case=False, na=False)) &
+        (data['price_for_two'] <= budget) &
+        (data['features'].str.contains(occasion, case=False, na=False))
     ]
 
-    if len(content_filtered_data) < top_n:
-        related_cuisines = location_filtered_data[
-            location_filtered_data['cuisine'].str.contains(cuisine, case=False, na=False)
-        ]
-        content_filtered_data = pd.concat([content_filtered_data, related_cuisines]).drop_duplicates()
+    liked_index = data[data['name'].str.contains(liked_restaurant, case=False, na=False)].index
+    if liked_index.empty:
+        return "Liked restaurant not found in the dataset."
 
-    if len(content_filtered_data) < top_n:
-        return content_filtered_data.sort_values(by='rating', ascending=False).head(top_n)
+    similarity_scores = cosine_similarity(tfidf_matrix[liked_index[0]], tfidf_matrix[matches.index]).flatten()
+    matches['weighted_score'] = similarity_scores * (matches['rating'] / data['rating'].max())
+    return matches.sort_values(by=['rating', 'weighted_score'], ascending=[False, False]).head(top_n)
 
-    # If liked restaurant is provided, calculate similarity
-    if liked_restaurant:
-        match = process.extractOne(liked_restaurant, data['name'])
-        if match and match[1] >= 80:
-            liked_index = data[data['name'] == match[0]].index[0]
-            similarity_scores = cosine_similarity(
-                tfidf_matrix[liked_index], tfidf_matrix[content_filtered_data.index]
-            ).flatten()
-            content_filtered_data['similarity_score'] = similarity_scores
-        else:
-            content_filtered_data['similarity_score'] = 1  # Default similarity score for unmatched
+data['features'] = data['more_info'].fillna('') + ',' + data['special features'].fillna('')
 
-    else:
-        content_filtered_data['similarity_score'] = 1
-
-    # Calculate weighted score
-    content_filtered_data['weighted_score'] = (
-        0.5 * content_filtered_data['similarity_score'] +
-        0.5 * (content_filtered_data['rating'] / data['rating'].max())
-    )
-
-    # Sort recommendations in descending order by weighted score
-    return content_filtered_data.sort_values(by='weighted_score', ascending=False).head(top_n)
-
-# Streamlit UI setup
 st.title("Restaurant Recommendation System")
 
 # Sidebar input
@@ -102,23 +132,35 @@ access_token = "pk.e28403f26ee75af55812430de27b810e"
 
 cuisine = st.sidebar.text_input("Preferred Cuisine (e.g., Indian, Chinese)")
 price_for_two = st.sidebar.slider("Budget for Two", 0, 3000, 500)
-planning_for = st.sidebar.text_input("Occasion (e.g., family, friends)")
+age = st.sidebar.slider("Your Age", 5, 80, 30)
+planning_for = st.sidebar.selectbox(
+    "Occasion / Planning for",
+    ['Party', 'DJ', 'Music', 'Bar', 'Pool table', 'Romantic dining', 'Dance', 'Games', 'Live sports', 'Buffet']
+)
 liked_restaurant = st.sidebar.text_input("Liked Restaurant (optional)")
 
-# Get recommendations on button click
 if st.sidebar.button("Get Recommendations"):
+    recommendations = recommend_restaurants_city(
+        liked_restaurant, cuisine, price_for_two, planning_for
+    )
+    if not recommendations.empty:
+        st.subheader("Recommended Restaurants")
+        st.dataframe(recommendations)
+
     if address:
-        user_lat, user_lon = get_lat_lon_from_address(address, access_token)
-        if user_lat and user_lon:
-            recommendations = recommend_restaurants(
-                user_lat, user_lon, cuisine, price_for_two, planning_for, liked_restaurant
-            )
-            if not recommendations.empty:
-                st.subheader("Recommended Restaurants")
-                st.dataframe(recommendations)
+        try:
+            user_lat, user_lon = get_lat_lon_from_address(address, access_token)
+            if user_lat and user_lon:
+                recommendations = recommend_restaurants(
+                    user_lat, user_lon, cuisine, price_for_two, planning_for, liked_restaurant, age
+                )
+                if not recommendations.empty:
+                    st.subheader("Recommended Restaurants Nearby")
+                    st.dataframe(recommendations)
+                else:
+                    st.warning("No recommendations found.")
             else:
-                st.warning("No recommendations found.")
-        else:
-            st.error("Invalid address.")
-    else:
-        st.error("Please enter a valid address.")
+                st.error("Invalid address.")
+        
+        except Exception as e:
+            st.warning("No matching restaurant found for this criteria nearby.")
