@@ -53,8 +53,8 @@ Built with **content-based filtering** and advanced techniques such as cosine si
 
 1. **Clone the repository**:  
    ```bash
-   git clone https://github.com/Abhinaycs/Restaurant-Recommendation-System-Hyderabad-city.git
-   cd restaurant-recommendation-system
+   git clone https://github.com/sushantkalamani/Restaurant_Recommendation_System.git
+   cd Restaurant_Recommendation_System
    ```
 
 2. **Create a virtual environment and activate it**:  
